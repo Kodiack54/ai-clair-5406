@@ -6,13 +6,9 @@
 
 const express = require('express');
 const router = express.Router();
-const { createClient } = require('@supabase/supabase-js');
+const supabase = require('../../../shared/db');
 
 // Initialize Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_KEY || ''
-);
 
 // GET /api/database/:project/tables - Get table list with prefix
 router.get('/:project/tables', async (req, res) => {

@@ -8,13 +8,9 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
-const { createClient } = require('@supabase/supabase-js');
+const supabase = require('../../../shared/db');
 
 // Initialize Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_KEY || ''
-);
 
 // Folders/files to ignore
 const IGNORE_PATTERNS = [

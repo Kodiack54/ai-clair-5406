@@ -1,177 +1,195 @@
 /**
- * Todos Routes - Scans TODO.md files by project folder
- *
- * Provides folder-based TODO.md viewing like the Structure tab
+ * Todos Routes - Query todos from database
+ * Reads from dev_ai_todos table where Susan stores extracted todos
  */
 
 const express = require('express');
 const router = express.Router();
-const path = require('path');
-const fs = require('fs').promises;
-const { glob } = require('glob');
+const { from } = require('../../../shared/db');
 
-// GET /api/todos/:project - Get TODO.md files organized by folder
+// GET /api/todos/:project - List all todos for a project
 router.get('/:project', async (req, res) => {
   try {
     const { project } = req.params;
     const projectPath = decodeURIComponent(project);
 
-    // Find all TODO.md files in the project
-    const pattern = path.join(projectPath, '**/TODO.md').replace(/\\/g, '/');
-    const todoFiles = await glob(pattern, { nodir: true });
+    console.log(`[Clair/Todos] Fetching todos for: ${projectPath}`);
 
-    const todos = await Promise.all(todoFiles.map(async (filePath) => {
-      try {
-        const content = await fs.readFile(filePath, 'utf-8');
-        const relativePath = path.relative(projectPath, filePath);
-        const folder = path.dirname(relativePath);
+    const { data, error } = await from('dev_ai_todos')
+      .select('*')
+      .eq('project_path', projectPath)
+      .order('created_at', { ascending: false });
 
-        // Parse TODO items from markdown
-        const items = parseTodoItems(content);
+    if (error) throw error;
 
-        return {
-          folder: folder === '.' ? '(root)' : folder,
-          filePath,
-          content,
-          items,
-          itemCount: items.length,
-          lastModified: (await fs.stat(filePath)).mtime
-        };
-      } catch (err) {
-        return {
-          folder: path.dirname(path.relative(projectPath, filePath)),
-          filePath,
-          error: err.message
-        };
+    // Group by status for UI
+    const grouped = {
+      pending: [],
+      in_progress: [],
+      completed: []
+    };
+
+    (data || []).forEach(todo => {
+      const status = todo.status || 'pending';
+      if (grouped[status]) {
+        grouped[status].push(todo);
+      } else {
+        grouped.pending.push(todo);
       }
-    }));
-
-    // Group by folder
-    const byFolder = todos.reduce((acc, todo) => {
-      if (!acc[todo.folder]) {
-        acc[todo.folder] = [];
-      }
-      acc[todo.folder].push(todo);
-      return acc;
-    }, {});
+    });
 
     res.json({
       success: true,
       project: projectPath,
-      folderCount: Object.keys(byFolder).length,
-      totalFiles: todos.length,
-      folders: byFolder,
-      scannedAt: new Date().toISOString()
+      todos: data || [],
+      grouped,
+      count: data?.length || 0,
+      stats: {
+        pending: grouped.pending.length,
+        in_progress: grouped.in_progress.length,
+        completed: grouped.completed.length
+      }
     });
   } catch (error) {
-    console.error('[Clair/Todos] Error:', error.message);
+    console.error('[Clair/Todos] List error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// POST /api/todos/:project/scan - Rescan project for TODO.md files
-router.post('/:project/scan', async (req, res) => {
+// POST /api/todos/:project - Create a new todo
+router.post('/:project', async (req, res) => {
   try {
     const { project } = req.params;
     const projectPath = decodeURIComponent(project);
+    const { title, description, priority, category, tags } = req.body;
 
-    // Same as GET but force refresh
-    const pattern = path.join(projectPath, '**/TODO.md').replace(/\\/g, '/');
-    const todoFiles = await glob(pattern, { nodir: true });
-
-    res.json({
-      success: true,
-      project: projectPath,
-      filesFound: todoFiles.length,
-      files: todoFiles.map(f => path.relative(projectPath, f)),
-      scannedAt: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('[Clair/Todos] Scan error:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// POST /api/todos/:project/create - Create TODO.md in a folder
-router.post('/:project/create', async (req, res) => {
-  try {
-    const { project } = req.params;
-    const { folder } = req.body;
-    const projectPath = decodeURIComponent(project);
-
-    const todoPath = path.join(projectPath, folder, 'TODO.md');
-
-    // Check if already exists
-    try {
-      await fs.access(todoPath);
-      return res.status(400).json({ success: false, error: 'TODO.md already exists' });
-    } catch {
-      // File doesn't exist, create it
+    if (!title) {
+      return res.status(400).json({ success: false, error: 'Title is required' });
     }
 
-    const template = `# TODO
+    const { data, error } = await from('dev_ai_todos')
+      .insert({
+        project_path: projectPath,
+        title,
+        description,
+        priority: priority || 'medium',
+        category,
+        tags: tags || [],
+        status: 'pending',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single();
 
-## Pending
-- [ ]
+    if (error) throw error;
 
-## In Progress
-
-## Completed
-`;
-
-    await fs.writeFile(todoPath, template, 'utf-8');
-
-    res.json({
-      success: true,
-      created: todoPath,
-      folder
-    });
+    res.json({ success: true, todo: data });
   } catch (error) {
     console.error('[Clair/Todos] Create error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/**
- * Parse TODO items from markdown content
- */
-function parseTodoItems(content) {
-  const items = [];
-  const lines = content.split('\n');
+// PATCH /api/todos/:project/:id - Update a todo
+router.patch('/:project/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
 
-  let currentSection = 'Uncategorized';
-
-  for (const line of lines) {
-    // Check for section headers
-    const headerMatch = line.match(/^#{1,3}\s+(.+)/);
-    if (headerMatch) {
-      currentSection = headerMatch[1].trim();
-      continue;
+    // Handle status change to completed
+    if (updates.status === 'completed' && !updates.completed_at) {
+      updates.completed_at = new Date().toISOString();
     }
 
-    // Check for checkbox items
-    const todoMatch = line.match(/^[\s-]*\[([ xX])\]\s*(.+)/);
-    if (todoMatch) {
-      items.push({
-        completed: todoMatch[1].toLowerCase() === 'x',
-        text: todoMatch[2].trim(),
-        section: currentSection
-      });
-    }
+    const { data, error } = await from('dev_ai_todos')
+      .update({
+        ...updates,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single();
 
-    // Check for bullet items without checkbox
-    const bulletMatch = line.match(/^[\s]*[-*]\s+(?!\[)(.+)/);
-    if (bulletMatch && !line.includes('[')) {
-      items.push({
-        completed: false,
-        text: bulletMatch[1].trim(),
-        section: currentSection,
-        isNote: true
-      });
-    }
+    if (error) throw error;
+
+    res.json({ success: true, todo: data });
+  } catch (error) {
+    console.error('[Clair/Todos] Update error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
+});
 
-  return items;
-}
+// PATCH /api/todos/:project/:id/complete - Mark todo as complete
+router.patch('/:project/:id/complete', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data, error } = await from('dev_ai_todos')
+      .update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, todo: data, message: 'Todo completed' });
+  } catch (error) {
+    console.error('[Clair/Todos] Complete error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// DELETE /api/todos/:project/:id - Delete a todo
+router.delete('/:project/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await from('dev_ai_todos')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+
+    res.json({ success: true, deleted: id });
+  } catch (error) {
+    console.error('[Clair/Todos] Delete error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/todos/stats/:project - Get todo statistics  
+router.get('/stats/:project', async (req, res) => {
+  try {
+    const { project } = req.params;
+    const projectPath = decodeURIComponent(project);
+
+    const { data, error } = await from('dev_ai_todos')
+      .select('status, priority')
+      .eq('project_path', projectPath);
+
+    if (error) throw error;
+
+    const stats = {
+      total: data?.length || 0,
+      byStatus: { pending: 0, in_progress: 0, completed: 0 },
+      byPriority: { low: 0, medium: 0, high: 0, critical: 0 }
+    };
+
+    data?.forEach(todo => {
+      if (stats.byStatus[todo.status] !== undefined) stats.byStatus[todo.status]++;
+      if (stats.byPriority[todo.priority] !== undefined) stats.byPriority[todo.priority]++;
+    });
+
+    res.json({ success: true, project: projectPath, stats });
+  } catch (error) {
+    console.error('[Clair/Todos] Stats error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 module.exports = router;

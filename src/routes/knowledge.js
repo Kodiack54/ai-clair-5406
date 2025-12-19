@@ -1,207 +1,192 @@
 /**
- * Knowledge/Journal Routes - Project work log, ideas, decisions, lessons
- *
- * Maintains a living journal for each project
+ * Knowledge Routes - Query knowledge from database
+ * Reads from dev_ai_knowledge table where Susan stores extracted knowledge
  */
 
 const express = require('express');
 const router = express.Router();
-const { createClient } = require('@supabase/supabase-js');
+const { from } = require('../../../shared/db');
 
-// Initialize Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_KEY || ''
-);
+// Map database entry to UI format
+function mapEntryForUI(item) {
+  return {
+    ...item,
+    // Map knowledge_type to type for UI compatibility
+    type: item.knowledge_type || item.category || 'work_log',
+    // Use summary as content if content is null
+    content: item.content || item.summary || ''
+  };
+}
 
-const ENTRY_TYPES = ['work_log', 'idea', 'decision', 'lesson'];
-
-// GET /api/journal/:project - Get journal entries
+// GET /api/journal/:project - List all knowledge for a project
 router.get('/:project', async (req, res) => {
   try {
     const { project } = req.params;
-    const { type, limit = 50, offset = 0 } = req.query;
     const projectPath = decodeURIComponent(project);
 
-    let query = supabase
-      .from('dev_ai_journal')
+    console.log(`[Clair/Knowledge] Fetching knowledge for: ${projectPath}`);
+
+    const { data, error } = await from('dev_ai_knowledge')
       .select('*')
       .eq('project_path', projectPath)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    if (type && ENTRY_TYPES.includes(type)) {
-      query = query.eq('entry_type', type);
-    }
-
-    const { data, error } = await query;
+      .order('created_at', { ascending: false });
 
     if (error) throw error;
 
-    // Group by entry type
+    // Map entries for UI
+    const entries = (data || []).map(mapEntryForUI);
+
+    // Group by type for UI columns
     const grouped = {
       work_log: [],
       idea: [],
       decision: [],
       lesson: []
     };
-
-    data?.forEach(entry => {
-      if (grouped[entry.entry_type]) {
-        grouped[entry.entry_type].push(entry);
+    
+    entries.forEach(item => {
+      const type = item.type || 'work_log';
+      if (grouped[type]) {
+        grouped[type].push(item);
+      } else {
+        grouped.work_log.push(item);
       }
     });
 
     res.json({
       success: true,
       project: projectPath,
-      total: data?.length || 0,
-      entries: data || [],
-      grouped
+      entries,
+      grouped,
+      count: entries.length,
+      stats: {
+        work_log: grouped.work_log.length,
+        idea: grouped.idea.length,
+        decision: grouped.decision.length,
+        lesson: grouped.lesson.length
+      }
     });
   } catch (error) {
-    console.error('[Clair/Journal] Error:', error.message);
+    console.error('[Clair/Knowledge] List error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// POST /api/journal/:project - Add journal entry
+// POST /api/journal/:project - Create a new knowledge entry
 router.post('/:project', async (req, res) => {
   try {
     const { project } = req.params;
-    const { entry_type, title, content, created_by } = req.body;
     const projectPath = decodeURIComponent(project);
-
-    if (!ENTRY_TYPES.includes(entry_type)) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid entry_type. Must be one of: ${ENTRY_TYPES.join(', ')}`
-      });
-    }
+    const { title, content, type, category, author, tags } = req.body;
 
     if (!title || !content) {
-      return res.status(400).json({
-        success: false,
-        error: 'title and content are required'
-      });
+      return res.status(400).json({ success: false, error: 'Title and content are required' });
     }
 
-    const { data, error } = await supabase
-      .from('dev_ai_journal')
+    const knowledgeType = type || category || 'work_log';
+
+    const { data, error } = await from('dev_ai_knowledge')
       .insert({
         project_path: projectPath,
-        entry_type,
         title,
         content,
-        created_by: created_by || 'clair'
+        summary: content,
+        knowledge_type: knowledgeType,
+        category: category || knowledgeType,
+        author,
+        tags: tags || [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       })
       .select()
       .single();
 
     if (error) throw error;
 
-    res.json({
-      success: true,
-      entry: data
-    });
+    res.json({ success: true, entry: mapEntryForUI(data) });
   } catch (error) {
-    console.error('[Clair/Journal] Create error:', error.message);
+    console.error('[Clair/Knowledge] Create error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// PATCH /api/journal/:project/:id - Update journal entry
+// PATCH /api/journal/:project/:id - Update a knowledge entry
 router.patch('/:project/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, content } = req.body;
-
-    const updates = {};
-    if (title) updates.title = title;
-    if (content) updates.content = content;
-
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'No fields to update'
-      });
+    const updates = { ...req.body };
+    
+    // Map type back to knowledge_type for database
+    if (updates.type) {
+      updates.knowledge_type = updates.type;
+      delete updates.type;
     }
 
-    const { data, error } = await supabase
-      .from('dev_ai_journal')
-      .update(updates)
+    const { data, error } = await from('dev_ai_knowledge')
+      .update({
+        ...updates,
+        updated_at: new Date().toISOString()
+      })
       .eq('id', id)
       .select()
       .single();
 
     if (error) throw error;
 
-    res.json({
-      success: true,
-      entry: data
-    });
+    res.json({ success: true, entry: mapEntryForUI(data) });
   } catch (error) {
-    console.error('[Clair/Journal] Update error:', error.message);
+    console.error('[Clair/Knowledge] Update error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// DELETE /api/journal/:project/:id - Delete journal entry
+// DELETE /api/journal/:project/:id - Delete a knowledge entry
 router.delete('/:project/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { error } = await supabase
-      .from('dev_ai_journal')
+    const { error } = await from('dev_ai_knowledge')
       .delete()
       .eq('id', id);
 
     if (error) throw error;
 
-    res.json({
-      success: true,
-      deleted: id
-    });
+    res.json({ success: true, deleted: id });
   } catch (error) {
-    console.error('[Clair/Journal] Delete error:', error.message);
+    console.error('[Clair/Knowledge] Delete error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// GET /api/journal/:project/stats - Get journal statistics
-router.get('/:project/stats', async (req, res) => {
+// GET /api/journal/search/:project - Search knowledge
+router.get('/search/:project', async (req, res) => {
   try {
     const { project } = req.params;
+    const { q } = req.query;
     const projectPath = decodeURIComponent(project);
 
-    const { data, error } = await supabase
-      .from('dev_ai_journal')
-      .select('entry_type')
-      .eq('project_path', projectPath);
+    if (!q) {
+      return res.status(400).json({ success: false, error: 'Search query required' });
+    }
+
+    const { data, error } = await from('dev_ai_knowledge')
+      .select('*')
+      .eq('project_path', projectPath)
+      .or(`title.ilike.%${q}%,content.ilike.%${q}%,summary.ilike.%${q}%`)
+      .order('created_at', { ascending: false });
 
     if (error) throw error;
 
-    const stats = {
-      work_log: 0,
-      idea: 0,
-      decision: 0,
-      lesson: 0,
-      total: data?.length || 0
-    };
-
-    data?.forEach(entry => {
-      if (stats[entry.entry_type] !== undefined) {
-        stats[entry.entry_type]++;
-      }
-    });
+    const results = (data || []).map(mapEntryForUI);
 
     res.json({
       success: true,
-      project: projectPath,
-      stats
+      query: q,
+      results,
+      count: results.length
     });
   } catch (error) {
-    console.error('[Clair/Journal] Stats error:', error.message);
+    console.error('[Clair/Knowledge] Search error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });

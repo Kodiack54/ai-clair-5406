@@ -7,12 +7,8 @@
 
 const express = require('express');
 const router = express.Router();
-const { createClient } = require('@supabase/supabase-js');
+const supabase = require('../../../shared/db');
 
-const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_KEY || ''
-);
 
 const ITEM_TYPES = ['knowledge', 'journal', 'doc', 'convention'];
 const CORRECTION_TYPES = ['move', 'remove', 'reword', 'note', 'merge'];
