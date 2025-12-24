@@ -10,6 +10,7 @@
 
 const supabase = require('../../../shared/db');
 const ai = require('../lib/ai');
+const projectRouter = require('./projectRouter');
 
 
 const ASSIST_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -55,7 +56,17 @@ async function runAssistCycle() {
     // 4. Update project structure trees
     await updateProjectStructures();
     
-    // 5. Sync project todos with Ryan
+    // 5. Run content-based project routing (final defense)
+    try {
+      const routeResult = await projectRouter.routeAllTables({ limit: 100 });
+      if (routeResult.totalRerouted > 0) {
+        console.log('[SusanAssist] Rerouted', routeResult.totalRerouted, 'items by content');
+      }
+    } catch (routeErr) {
+      console.error('[SusanAssist] Routing error:', routeErr.message);
+    }
+
+    // 6. Sync project todos with Ryan
     if (recentTodos.length > 0) {
       await syncProjectTodos(recentTodos);
     }
